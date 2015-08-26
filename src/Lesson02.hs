@@ -1,6 +1,6 @@
 {-# LANGUAGE JavaScriptFFI      #-}
 {-# LANGUAGE OverloadedStrings  #-}
-{-# LANGUAGE QuasiQuotes        #-}
+{-# LANGUAGE QuasiQuotes  #-}
 
 import Control.Applicative
 import Control.Monad
@@ -10,26 +10,32 @@ import qualified GHCJS.Types    as T
 import qualified GHCJS.Foreign  as F
 import qualified GHCJS.Marshal  as M
 
--- Use our own WebGL/glMatrix bindings through a little utiltity/reader library.
 import WebGL
 import Simple
 
--- We could type these as vertex/fragment shader sources with a little template haskell work...
--- That would be cool, but not incredibly useful.
 fragmentShaderSrc = [src|
-    precision mediump float;
-    void main(void) {
-        gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);
-    }
+  precision mediump float;
+
+  varying vec4 vColor;
+
+  void main(void) {
+    gl_FragColor = vColor;
+  }
 |]
 
 vertexShaderSrc = [src|
-    attribute vec3 aVertexPosition;
-    uniform mat4 uMVMatrix;
-    uniform mat4 uPMatrix;
-    void main(void) {
-        gl_Position = uPMatrix * uMVMatrix * vec4(aVertexPosition, 1.0);
-    }
+  attribute vec3 aVertexPosition;
+  attribute vec4 aVertexColor;
+
+  uniform mat4 uMVMatrix;
+  uniform mat4 uPMatrix;
+
+  varying vec4 vColor;
+
+  void main(void) {
+    gl_Position = uPMatrix * uMVMatrix * vec4(aVertexPosition, 1.0);
+    vColor = aVertexColor;
+  }
 |]
 
 data GLInfo = GLInfo { glContext :: GL
@@ -37,8 +43,9 @@ data GLInfo = GLInfo { glContext :: GL
                      , glHeight :: Int
                      }
 
-data WhiteShader = WhiteShader { wsProgram :: ShaderProgram
+data ColorShader = ColorShader { wsProgram :: ShaderProgram
                                , wsVertexP :: ShaderAttribute
+                               , sVertexColor :: ShaderAttribute
                                , wsPMatrix :: ShaderUniform
                                , wsMVMatrix :: ShaderUniform
                                }
@@ -53,21 +60,23 @@ makeShaders = do
   vertexShader <- makeShader vertexShaderSrc createVertexShader
   return (vertexShader, fragmentShader)
 
-makeProgram :: (Shader VertexShader, Shader FragmentShader) -> GLIO WhiteShader
+makeProgram :: (Shader VertexShader, Shader FragmentShader) -> GLIO ColorShader
 makeProgram (vertexShader, fragmentShader) = do
   program <- buildProgram vertexShader fragmentShader
 
   useProgram program
 
   vertexPosition <- getAttribLocation program $ glStr "aVertexPosition"
+  vertexColor <- getAttribLocation program $ glStr "aVertexColor"
   pMatrixU <- getUniformLocation program (glStr "uPMatrix")
   mvMatrixU <- getUniformLocation program (glStr "uMVMatrix")
 
   enableVAA vertexPosition
+  enableVAA vertexColor
 
-  return $ WhiteShader program vertexPosition pMatrixU mvMatrixU
+  return $ ColorShader program vertexPosition vertexColor pMatrixU mvMatrixU
 
-initBuffers :: GLIO (BufferInfo, BufferInfo)
+initBuffers :: GLIO (BufferInfo, BufferInfo, BufferInfo, BufferInfo)
 initBuffers = do
   triangle <- toBuffer $ V3L [ ( 0.0, 1.0,  0.0)
                              , (-1.0, -1.0, 0.0)
@@ -78,10 +87,15 @@ initBuffers = do
                            , ( 1.0, -1.0,  0.0)
                            , (-1.0, -1.0,  0.0)
                            ]
-  return (triangle, square)
+  triangleColors <- toBuffer $ V4L [ (1.0, 0.0, 0.0, 1.0)
+                                   , (0.0, 1.0, 0.0, 1.0)
+                                   , (0.0, 0.0, 1.0, 1.0)
+                                   ]
+  squareColors <- toBuffer $ V4L $ replicate 4 (0.5, 0.5, 1.0, 1.0)
+  return (triangle, square, triangleColors, squareColors)
 
-drawScene :: (Int, Int) -> WhiteShader -> (BufferInfo, BufferInfo) -> GLIO ()
-drawScene (width, height) shader (triangle, square) = do
+drawScene :: (Int, Int) -> ColorShader -> (BufferInfo, BufferInfo, BufferInfo, BufferInfo) -> GLIO ()
+drawScene (width, height) shader (triangle, square, triangleColors, squareColors) = do
   clear
   viewport 0 0 width height
   -- This will run without the call to viewport
@@ -95,18 +109,20 @@ drawScene (width, height) shader (triangle, square) = do
 
   -- move is a 3-element list...
   -- Some of the types here are still quite loose.
-  let moveAndDraw move shape = do
+  let moveAndDraw move shape colors = do
         mat4translate moveMatrix =<< glList move
         bindBuffer arrayBuffer (buffer shape)
         vertexAttribPointer (wsVertexP shader) (itemSize shape)
+        bindBuffer arrayBuffer (buffer colors)
+        vertexAttribPointer (sVertexColor shader) (itemSize colors)
         uniformMatrix4fv (wsPMatrix shader) positionMatrix
         uniformMatrix4fv (wsMVMatrix shader) moveMatrix
-        -- The original draws 'triangles' for the triangle and a triangle strip for the square...
+        -- The original draws 'triangles' for the triangle and a strip for the square...
         -- Probably for didactic reasons. We can refactor that out when we need to.
         drawArrays drawTriangleStrip 0 (numItems shape)
 
-  moveAndDraw [-1.4, 0.0, -7.0] triangle
-  moveAndDraw [3.0, 0.0, 0.0] square
+  moveAndDraw [-1.4, 0.0, -7.0] triangle triangleColors
+  moveAndDraw [3.0, 0.0, 0.0] square squareColors
 
 main = runLesson1 =<< initGL =<< js_documentGetElementById "lesson01-canvas"
 
@@ -114,7 +130,7 @@ runLesson1 glInfo = flip runReaderT (glContext glInfo) $ do
   clearColor 0.0 0.0 0.0 1.0
   enableDepthTest
 
-  whiteShader <- makeProgram =<< makeShaders
+  shaderProgram <- makeProgram =<< makeShaders
 
   buffers <- initBuffers
-  drawScene (glWidth glInfo, glHeight glInfo) whiteShader buffers
+  drawScene (glWidth glInfo, glHeight glInfo) shaderProgram buffers

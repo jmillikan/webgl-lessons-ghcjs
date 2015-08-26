@@ -10,6 +10,8 @@ buildEx() {
 if [ -z $1 ] 
   then 
     buildEx src/index.html ghcjs-webgl-lesson01
+    buildEx src/index.html ghcjs-webgl-lesson02
+    buildEx src/index.html ghcjs-webgl-lesson03
 else
   buildEx $1 $2
 fi
